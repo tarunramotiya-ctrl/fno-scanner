@@ -409,7 +409,7 @@ with tab3:
                 monthly_data['Month_Str'] = monthly_data.index.strftime('%B %Y')
                 
                 out_strings = []
-                for idx, row in monthly_data.head(12).iterrows():
+                for idx, row in monthly_data.head(36).iterrows():
                     val = row['Net Change % (Direction)']
                     vol = row['Volatility % (Swing)']
                     emoji = "🟢 Upward" if val > 0 else "🔴 Downward"
@@ -420,7 +420,7 @@ with tab3:
                     for i, txt in enumerate(out_strings):
                         cols[i % 3].markdown(txt)
                         
-                    m_df = monthly_data.head(12).copy().sort_index(ascending=True)
+                    m_df = monthly_data.head(36).copy().sort_index(ascending=True)
                     colors = ['rgba(0, 255, 0, 0.6)' if val > 0 else 'rgba(255, 0, 0, 0.6)' for val in m_df['Net Change % (Direction)']]
                     
                     fig3 = go.Figure()
