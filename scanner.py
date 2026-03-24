@@ -49,10 +49,16 @@ def fetch_nse_live_options(symbol):
         
         if response.status_code == 200:
             data = response.json()
+            if not data: return "N/A"
+            
             records = data.get('records', {}).get('data', [])
+            if not records: return "N/A"
+            
             total_ce_oi = sum(r.get('CE', {}).get('openInterest', 0) for r in records if 'CE' in r)
             total_pe_oi = sum(r.get('PE', {}).get('openInterest', 0) for r in records if 'PE' in r)
-            pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 1
+            if total_ce_oi == 0: return "N/A"
+            
+            pcr = total_pe_oi / total_ce_oi
             return round(pcr, 2)
         return "N/A"
     except Exception as e:
