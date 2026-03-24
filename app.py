@@ -240,18 +240,22 @@ with tab1:
 # --- TAB 2: BACKTESTER ---
 with tab2:
     st.header("Automated Strategy Backtester")
-    st.markdown("Run a simulated 2-year backtest using various Institutional Strategies to determine win rates.")
+    st.markdown("Run a simulated mathematical backtest using various Institutional Strategies to determine true statistical edge.")
     
     colA, colB = st.columns([1, 3])
     with colA:
         test_stock = st.selectbox("Select Asset to Backtest", fno_tickers)
+        
+        duration_map = {"1 Year": "1y", "2 Years": "2y", "3 Years": "3y", "5 Years": "5y", "10 Years": "10y"}
+        dur_choice = st.selectbox("Historical Duration", list(duration_map.keys()), index=3) # Default 5y
+        
         strategy_options = ["EMA 9/20 Crossover", "RSI Oversold Bounce", "Bollinger Breakout", "200 DMA Reversal", "VWAP Bounce/Reversal", "Combined Master (RSI + BB)", "🌟 Auto-Optimize (Test All)"]
         strategy = st.radio("Select Strategy Engine", strategy_options)
         run_sim = st.button("Run Simulation >")
         
     if run_sim:
-        with st.spinner(f"Simulating {strategy} Strategy..."):
-            hist_data = fetch_market_data([test_stock], period="2y", interval="1d").get(test_stock, pd.DataFrame()).copy()
+        with st.spinner(f"Simulating {strategy} Strategy over {dur_choice}..."):
+            hist_data = fetch_market_data([test_stock], period=duration_map[dur_choice], interval="1d").get(test_stock, pd.DataFrame()).copy()
             
             if not hist_data.empty:
                 strats_to_run = ["EMA 9/20 Crossover", "RSI Oversold Bounce", "Bollinger Breakout", "200 DMA Reversal", "VWAP Bounce/Reversal", "Combined Master (RSI + BB)"] if "Auto-Optimize" in strategy else [strategy]
