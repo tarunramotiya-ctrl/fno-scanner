@@ -11,7 +11,7 @@ from datetime import datetime
 st.set_page_config(page_title="Indian F&O Scanner Pro", layout="wide")
 
 # Import custom modules
-from scanner import fetch_market_data
+from scanner import fetch_market_data, fetch_nse_live_options
 from vol_profile import calculate_levels
 from option_range import calculate_expiration_range
 
@@ -36,9 +36,9 @@ st.sidebar.header("1. Filter Watchlist:")
 selected_tickers = st.sidebar.multiselect("Limit scan to specific stocks:", options=fno_tickers, default=[])
 tickers_to_scan = selected_tickers if selected_tickers else fno_tickers
 
-st.sidebar.header("2. Options Data (CE/PE)")
-st.sidebar.caption("Provide your Options CSV. Make sure it contains 'SYMBOL', 'CE', and 'PE' columns.")
-options_file = st.sidebar.file_uploader("Upload Market PE/CE Data", type=['csv'])
+st.sidebar.header("2. Live NSE Options Data")
+st.sidebar.caption("The engine will automatically scrape the exact Put-Call ratio direct from NSE servers for your Top 12 stocks.")
+fetch_options = st.sidebar.checkbox("Enable Live NSE Options Scraping (Beta)", value=False)
 
 st.sidebar.header("3. API Telegram Setup")
 tg_token = st.sidebar.text_input("Bot API Token", type="password")
@@ -46,16 +46,23 @@ tg_chat_id = st.sidebar.text_input("Chat ID")
 
 # --- DATA PROCESS ENGINE ---
 @st.cache_data(ttl=60) # Cache reduced to 1 minute for live market testing
-def load_and_process_data(tickers):
-    # Fetch Daily
-    market_data = fetch_market_data(tickers, period="1y", interval="1d")
+def load_and_process_data(tickers, scrape_options):
+    # Determine base fetch list (includes Nifty for RS baseline)
+    fetch_list = list(set(tickers + ["^NSEI"]))
+    market_data = fetch_market_data(fetch_list, period="1y", interval="1d")
     
+    # Process Nifty50 RS Baseline
+    nifty_data = market_data.get("^NSEI", pd.DataFrame())
+    nifty_20d_ret = (nifty_data['Close'].iloc[-1] - nifty_data['Close'].iloc[-20]) / nifty_data['Close'].iloc[-20] if not nifty_data.empty and len(nifty_data) > 20 else 0
+
     # Fetch Hourly for MTFA (Limited to 1mo for accuracy)
     market_data_1h = fetch_market_data(tickers, period="1mo", interval="1h") if tickers else {}
     
     results = []
     
-    for ticker, df in market_data.items():
+    for ticker in tickers:
+        if ticker not in market_data: continue
+        df = market_data[ticker]
         if len(df) < 50: continue
             
         # PREDICTIVE BREAKOUT LOGIC (Day 1 Engines)
@@ -74,6 +81,16 @@ def load_and_process_data(tickers):
         recent_20d_high = df['High'].rolling(20).max().shift(1).iloc[-1]
         dist_from_high = (current_price - recent_20d_high) / recent_20d_high if recent_20d_high > 0 else 0
         
+        # Relative Strength (RS) vs Nifty 50
+        rs_rating = "NEUTRAL ➖"
+        if not nifty_data.empty and len(df) >= 20:
+            stock_20d_ret = (df['Close'].iloc[-1] - df['Close'].iloc[-20]) / df['Close'].iloc[-20]
+            rs_diff = stock_20d_ret - nifty_20d_ret
+            if rs_diff > 0.05:
+                rs_rating = "OUTPERFORM 🔥"
+            elif rs_diff < -0.05:
+                rs_rating = "WEAK 🧨"
+
         # MACD
         ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema_26 = df['Close'].ewm(span=26, adjust=False).mean()
@@ -103,36 +120,16 @@ def load_and_process_data(tickers):
                 hourly_trend = "BULL 🟢" if ema9_1h > ema20_1h else "BEAR 🔴"
                 
         # Upgraded Predictive Score Calculation
-        # 1. Base momentum stretch (Today's explosiveness)
         base_momentum = abs(daily_return) * 100
-        
-        # 2. Squeeze Trigger: Highly reward stocks breaking out of tight consolidations
-        # If bb_width is tiny (e.g. 5%), 0.10 / 0.05 = 2.0x Squeeze Multiplier
         squeeze_multiplier = max(1.0, 0.10 / (bb_width + 0.001))
-            
-        # 3. Volume weight (Cap extreme anomalous volume spikes at 5x)
         capped_vol_spike = min(vol_spike, 5.0) 
         
-        # 4. Trend Alignment Multipliers
         alignment_multiplier = 1.0
-        
-        # a. Fresh Breakout Proximity: Is it crossing/near the 20-day high?
-        if daily_return > 0 and -0.05 <= dist_from_high <= 0.05:
-            alignment_multiplier += 0.5 # Huge points for fresh 20-day breakouts
+        if daily_return > 0 and -0.05 <= dist_from_high <= 0.05: alignment_multiplier += 0.5 
+        if (deviation > 0 and macd_hist > 0) or (deviation < 0 and macd_hist < 0): alignment_multiplier += 0.3 
+        if deviation > 0 and 55 <= current_rsi <= 75: alignment_multiplier += 0.2 
+        if (deviation > 0 and hourly_trend == "BULL 🟢") or (deviation < 0 and hourly_trend == "BEAR 🔴"): alignment_multiplier += 0.5 
             
-        # b. MACD Alignment
-        if (deviation > 0 and macd_hist > 0) or (deviation < 0 and macd_hist < 0):
-            alignment_multiplier += 0.3 
-            
-        # c. RSI Validation (55-75 is breakout initiation zone)
-        if deviation > 0 and 55 <= current_rsi <= 75:
-            alignment_multiplier += 0.2 
-            
-        # d. Multi-Timeframe (Hourly) Agreement
-        if (deviation > 0 and hourly_trend == "BULL 🟢") or (deviation < 0 and hourly_trend == "BEAR 🔴"):
-            alignment_multiplier += 0.5 
-            
-        # Final Exploding Score: A tight squeeze + Heavy Vol + Daily Breakout = #1 Rank
         score = base_momentum * squeeze_multiplier * capped_vol_spike * alignment_multiplier
         
         df_levels = calculate_levels(df)
@@ -144,6 +141,7 @@ def load_and_process_data(tickers):
         results.append({
             "Ticker": ticker,
             "1H_Trend": hourly_trend,
+            "RS_Rating": rs_rating,
             "Daily_MACD": "BULL 📈" if macd_hist > 0 else "BEAR 📉",
             "Score": round(score, 2),
             "Price": round(current_price, 2),
@@ -157,27 +155,17 @@ def load_and_process_data(tickers):
         
     df_results = pd.DataFrame(results)
     
-    # Options Data Integration
-    if options_file is not None:
-        try:
-            opt_df = pd.read_csv(options_file)
-            opt_df.columns = opt_df.columns.str.strip().str.upper()
-            if 'SYMBOL' in opt_df.columns:
-                opt_df['Ticker'] = opt_df['SYMBOL'].str.strip() + '.NS'
-                
-                # Automatically calculate Put-Call Ratio if CE and PE columns exist
-                if 'PE' in opt_df.columns and 'CE' in opt_df.columns:
-                    # Avoid division by zero
-                    opt_df['PCR'] = np.where(opt_df['CE'] > 0, opt_df['PE'] / opt_df['CE'], 1)
-                    opt_df['PCR'] = opt_df['PCR'].round(2)
-                    df_results = df_results.merge(opt_df[['Ticker', 'PCR']], on='Ticker', how='left')
-                    
-        except Exception as e:
-            st.sidebar.error(f"Error reading options CSV: {e}")
-            
     if not df_results.empty:
         # Default sort by Score
-        top_stocks = df_results.sort_values(by="Score", ascending=False).head(12)
+        top_stocks = df_results.sort_values(by="Score", ascending=False).head(12).copy()
+        
+        # LIVE NSE SCRAPER
+        if scrape_options:
+            pcr_list = []
+            for t in top_stocks['Ticker']:
+                pcr_list.append(fetch_nse_live_options(t))
+            top_stocks['Live_PCR'] = pcr_list
+            
         return top_stocks, market_data
         
     return pd.DataFrame(), market_data
@@ -188,7 +176,7 @@ tab1, tab2 = st.tabs(["📊 Live Market Scanner", "🔄 Strategy Backtester"])
 # --- TAB 1: LIVE SCANNER ---
 with tab1:
     with st.spinner("Executing Multi-Timeframe Institutional Scan..."):
-        top_12_df, full_market_data = load_and_process_data(tickers_to_scan)
+        top_12_df, full_market_data = load_and_process_data(tickers_to_scan, fetch_options)
 
     if not top_12_df.empty:
         st.subheader(f"🚀 Top Actionable Stocks ({len(top_12_df)} symbols)")
@@ -250,40 +238,63 @@ with tab1:
 # --- TAB 2: BACKTESTER ---
 with tab2:
     st.header("Automated Strategy Backtester")
-    st.markdown("Run a simulated 2-year backtest using the EMA 9/20 Crossover Momentum Strategy to determine win rates.")
+    st.markdown("Run a simulated 2-year backtest using various Institutional Strategies to determine win rates.")
     
     colA, colB = st.columns([1, 3])
     with colA:
         test_stock = st.selectbox("Select Asset to Backtest", fno_tickers)
+        strategy = st.radio("Select Strategy Engine", ["EMA 9/20 Crossover", "RSI Oversold Bounce", "Bollinger Breakout"])
         run_sim = st.button("Run Simulation >")
         
     if run_sim:
-        with st.spinner("Processing historical order book..."):
-            hist_data = fetch_market_data([test_stock], period="2y", interval="1d")[test_stock]
-            hist_data['EMA_9'] = hist_data['Close'].ewm(span=9).mean()
-            hist_data['EMA_20'] = hist_data['Close'].ewm(span=20).mean()
+        with st.spinner(f"Simulating {strategy} Strategy..."):
+            hist_data = fetch_market_data([test_stock], period="2y", interval="1d").get(test_stock, pd.DataFrame()).copy()
             
-            # Rules: Buy when EMA9 > EMA20, Sell/Short when EMA9 < EMA20
-            hist_data['Signal'] = np.where(hist_data['EMA_9'] > hist_data['EMA_20'], 1, -1)
-            hist_data['Position'] = hist_data['Signal'].shift() # We enter on next candle
-            hist_data['Strategy_Return'] = hist_data['Position'] * (hist_data['Close'].pct_change())
-            
-            # Cumulative Math
-            cum_strat = (1 + hist_data['Strategy_Return']).cumprod()
-            cum_bh = (1 + hist_data['Close'].pct_change()).cumprod()
-            
-            # Plot
-            fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(x=hist_data.index, y=cum_strat, line=dict(color='green', width=2), name="Strategy Equity Curve"))
-            fig2.add_trace(go.Scatter(x=hist_data.index, y=cum_bh, line=dict(color='gray', width=1, dash='dash'), name="Hold Equity Curve"))
-            fig2.update_layout(title=f"{test_stock} Trading Output", height=500, template="plotly_dark")
-            
-            st.plotly_chart(fig2, use_container_width=True)
-            
-            # Metrics
-            end_strat = round((cum_strat.iloc[-1] - 1) * 100, 2) if not pd.isna(cum_strat.iloc[-1]) else 0
-            end_bh = round((cum_bh.iloc[-1] - 1) * 100, 2) if not pd.isna(cum_bh.iloc[-1]) else 0
-            
-            m1, m2 = st.columns(2)
-            m1.metric("Bot Total Return", f"{end_strat}%")
-            m2.metric("Buy & Hold Return", f"{end_bh}%")
+            if not hist_data.empty:
+                if strategy == "EMA 9/20 Crossover":
+                    hist_data['EMA_9'] = hist_data['Close'].ewm(span=9).mean()
+                    hist_data['EMA_20'] = hist_data['Close'].ewm(span=20).mean()
+                    hist_data['Signal'] = np.where(hist_data['EMA_9'] > hist_data['EMA_20'], 1, -1)
+                    
+                elif strategy == "RSI Oversold Bounce":
+                    delta = hist_data['Close'].diff()
+                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                    rs = gain / loss
+                    hist_data['RSI'] = 100 - (100 / (1 + rs))
+                    # Buy when RSI < 35, Sell when RSI > 65
+                    hist_data['Signal'] = np.where(hist_data['RSI'] < 35, 1, np.where(hist_data['RSI'] > 65, -1, 0))
+                    hist_data['Signal'] = hist_data['Signal'].replace(to_replace=0, method='ffill')
+                    
+                elif strategy == "Bollinger Breakout":
+                    sma_20 = hist_data['Close'].rolling(20).mean()
+                    std_20 = hist_data['Close'].rolling(20).std()
+                    hist_data['Upper_BB'] = sma_20 + (2 * std_20)
+                    hist_data['Lower_BB'] = sma_20 - (2 * std_20)
+                    hist_data['Signal'] = np.where(hist_data['Close'] > hist_data['Upper_BB'], 1, np.where(hist_data['Close'] < hist_data['Lower_BB'], -1, 0))
+                    hist_data['Signal'] = hist_data['Signal'].replace(to_replace=0, method='ffill')
+                
+                hist_data['Position'] = hist_data['Signal'].shift() # We enter on next candle
+                hist_data['Strategy_Return'] = hist_data['Position'] * (hist_data['Close'].pct_change())
+                
+                # Cumulative Math
+                cum_strat = (1 + hist_data['Strategy_Return']).cumprod()
+                cum_bh = (1 + hist_data['Close'].pct_change()).cumprod()
+                
+                # Plot
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(x=hist_data.index, y=cum_strat, line=dict(color='green', width=2), name="Strategy Equity Curve"))
+                fig2.add_trace(go.Scatter(x=hist_data.index, y=cum_bh, line=dict(color='gray', width=1, dash='dash'), name="Hold Equity Curve"))
+                fig2.update_layout(title=f"{test_stock} Trading Output", height=500, template="plotly_dark")
+                
+                st.plotly_chart(fig2, use_container_width=True)
+                
+                # Metrics
+                end_strat = round((cum_strat.iloc[-1] - 1) * 100, 2) if not pd.isna(cum_strat.iloc[-1]) else 0
+                end_bh = round((cum_bh.iloc[-1] - 1) * 100, 2) if not pd.isna(cum_bh.iloc[-1]) else 0
+                
+                m1, m2 = st.columns(2)
+                m1.metric("Strategy Total Return", f"{end_strat}%")
+                m2.metric("Buy & Hold Return", f"{end_bh}%")
+            else:
+                st.error("Failed to load historical data for simulation.")
