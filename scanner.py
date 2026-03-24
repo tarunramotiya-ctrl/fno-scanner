@@ -1,5 +1,8 @@
 import yfinance as yf
 import pandas as pd
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 def fetch_market_data(tickers, period="1y", interval="1d"):
     """
@@ -19,6 +22,42 @@ def fetch_market_data(tickers, period="1y", interval="1d"):
         print(f"Successfully loaded {len(df)} days of data for {ticker}")
         
     return clean_data
+
+def fetch_nse_live_options(symbol):
+    """
+    Scrapes live PCR from NSE India. Uses a Session to bypass basic firewalls.
+    """
+    clean_symbol = symbol.replace('.NS', '').replace('&', '%26').upper()
+    url = f"https://www.nseindia.com/api/option-chain-equities?symbol={clean_symbol}"
+    
+    headers = {
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'accept': '*/*',
+        'accept-encoding': 'gzip, deflate, br',
+        'accept-language': 'en-US,en;q=0.9'
+    }
+    
+    try:
+        session = requests.Session()
+        req_retry = Retry(total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
+        session.mount('https://', HTTPAdapter(max_retries=req_retry))
+        
+        # Ping homepage to generate requisite cookies
+        session.get("https://www.nseindia.com", headers=headers, timeout=5)
+        # Fetch actual API Option Chain
+        response = session.get(url, headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            records = data.get('records', {}).get('data', [])
+            total_ce_oi = sum(r.get('CE', {}).get('openInterest', 0) for r in records if 'CE' in r)
+            total_pe_oi = sum(r.get('PE', {}).get('openInterest', 0) for r in records if 'PE' in r)
+            pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 1
+            return round(pcr, 2)
+        return "N/A"
+    except Exception as e:
+        print(f"NSE Scrape Error {symbol}: {e}")
+        return "N/A"
 
 # Test the Data Engine with 5 major Nifty F&O stocks
 if __name__ == "__main__":
