@@ -11,7 +11,7 @@ def fetch_market_data(tickers, period="1y", interval="1d"):
     print(f"Fetching data for {len(tickers)} stocks with interval {interval}...")
     
     # Download data for all tickers at once (groups by ticker)
-    data = yf.download(tickers, period=period, interval=interval, group_by='ticker')
+    data = yf.download(tickers, period=period, interval=interval, group_by='ticker', threads=False, progress=False)
     
     clean_data = {}
     
