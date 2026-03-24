@@ -45,7 +45,7 @@ tg_token = st.sidebar.text_input("Bot API Token", type="password")
 tg_chat_id = st.sidebar.text_input("Chat ID")
 
 # --- DATA PROCESS ENGINE ---
-@st.cache_data(ttl=60) # Cache reduced to 1 minute for live market testing
+@st.cache_data(ttl=300) # Cache increased to 5 minutes to prevent Cloud Container Thread exhaustion
 def load_and_process_data(tickers, scrape_options):
     # Determine base fetch list (includes Nifty for RS baseline)
     fetch_list = list(set(tickers + ["^NSEI"]))
