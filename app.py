@@ -17,6 +17,7 @@ from option_range import calculate_expiration_range
 
 st.title("📈 Institutional F&O Trading Engine")
 st.markdown("Advanced MTFA Scanner, Options Analytics, Backtesting, & Telegram Integration.")
+st.caption(f"⏱️ Scan Executed At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (Free Yahoo Finance data is typically delayed by 15-20 mins)")
 
 # --- INITIALIZATION & CSV LOAD ---
 csv_path = os.path.join(os.path.dirname(__file__), "stock update f&o.csv")
@@ -44,7 +45,7 @@ tg_token = st.sidebar.text_input("Bot API Token", type="password")
 tg_chat_id = st.sidebar.text_input("Chat ID")
 
 # --- DATA PROCESS ENGINE ---
-@st.cache_data(ttl=1800) # Cache for 30 minutes
+@st.cache_data(ttl=60) # Cache reduced to 1 minute for live market testing
 def load_and_process_data(tickers):
     # Fetch Daily
     market_data = fetch_market_data(tickers, period="1y", interval="1d")
@@ -57,12 +58,21 @@ def load_and_process_data(tickers):
     for ticker, df in market_data.items():
         if len(df) < 50: continue
             
-        df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3
-        df['VWAP'] = (df['Typical_Price'] * df['Volume']).cumsum() / df['Volume'].cumsum()
-        
+        # PREDICTIVE BREAKOUT LOGIC (Day 1 Engines)
         current_price = df['Close'].iloc[-1]
-        vwap_price = df['VWAP'].iloc[-1]
-        deviation = (current_price - vwap_price) / vwap_price
+        daily_return = df['Close'].pct_change().iloc[-1] if not pd.isna(df['Close'].pct_change().iloc[-1]) else 0
+        deviation = daily_return # Rename concept for UI column
+        
+        # Bollinger Band Squeeze Calculation (20-day)
+        sma_20 = df['Close'].rolling(window=20).mean()
+        std_20 = df['Close'].rolling(window=20).std()
+        upper_bb = (sma_20 + (2 * std_20)).iloc[-1]
+        lower_bb = (sma_20 - (2 * std_20)).iloc[-1]
+        bb_width = (upper_bb - lower_bb) / sma_20.iloc[-1] if sma_20.iloc[-1] > 0 else 0.1
+        
+        # Distance from 20-Day Resistance
+        recent_20d_high = df['High'].rolling(20).max().shift(1).iloc[-1]
+        dist_from_high = (current_price - recent_20d_high) / recent_20d_high if recent_20d_high > 0 else 0
         
         # MACD
         ema_12 = df['Close'].ewm(span=12, adjust=False).mean()
@@ -92,8 +102,38 @@ def load_and_process_data(tickers):
                 ema20_1h = df_1h['Close'].ewm(span=20).mean().iloc[-1]
                 hourly_trend = "BULL 🟢" if ema9_1h > ema20_1h else "BEAR 🔴"
                 
-        # Pro Score Calculation
-        score = abs(deviation) * vol_spike * 100
+        # Upgraded Predictive Score Calculation
+        # 1. Base momentum stretch (Today's explosiveness)
+        base_momentum = abs(daily_return) * 100
+        
+        # 2. Squeeze Trigger: Highly reward stocks breaking out of tight consolidations
+        # If bb_width is tiny (e.g. 5%), 0.10 / 0.05 = 2.0x Squeeze Multiplier
+        squeeze_multiplier = max(1.0, 0.10 / (bb_width + 0.001))
+            
+        # 3. Volume weight (Cap extreme anomalous volume spikes at 5x)
+        capped_vol_spike = min(vol_spike, 5.0) 
+        
+        # 4. Trend Alignment Multipliers
+        alignment_multiplier = 1.0
+        
+        # a. Fresh Breakout Proximity: Is it crossing/near the 20-day high?
+        if daily_return > 0 and -0.05 <= dist_from_high <= 0.05:
+            alignment_multiplier += 0.5 # Huge points for fresh 20-day breakouts
+            
+        # b. MACD Alignment
+        if (deviation > 0 and macd_hist > 0) or (deviation < 0 and macd_hist < 0):
+            alignment_multiplier += 0.3 
+            
+        # c. RSI Validation (55-75 is breakout initiation zone)
+        if deviation > 0 and 55 <= current_rsi <= 75:
+            alignment_multiplier += 0.2 
+            
+        # d. Multi-Timeframe (Hourly) Agreement
+        if (deviation > 0 and hourly_trend == "BULL 🟢") or (deviation < 0 and hourly_trend == "BEAR 🔴"):
+            alignment_multiplier += 0.5 
+            
+        # Final Exploding Score: A tight squeeze + Heavy Vol + Daily Breakout = #1 Rank
+        score = base_momentum * squeeze_multiplier * capped_vol_spike * alignment_multiplier
         
         df_levels = calculate_levels(df)
         support = df_levels['Support'].iloc[-1] if not df_levels.empty else current_price
