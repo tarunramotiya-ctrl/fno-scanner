@@ -171,7 +171,7 @@ def load_and_process_data(tickers, scrape_options):
     return pd.DataFrame(), market_data
 
 # --- APP LAYOUT (TABS) ---
-tab1, tab2 = st.tabs(["📊 Live Market Scanner", "🔄 Strategy Backtester"])
+tab1, tab2, tab3 = st.tabs(["📊 Live Market Scanner", "🔄 Strategy Backtester", "🔍 Stock Deep-Dive"])
 
 # --- TAB 1: LIVE SCANNER ---
 with tab1:
@@ -298,3 +298,113 @@ with tab2:
                 m2.metric("Buy & Hold Return", f"{end_bh}%")
             else:
                 st.error("Failed to load historical data for simulation.")
+
+# --- TAB 3: DEEP-DIVE PROFILE ---
+with tab3:
+    st.header("Single Stock Deep-Dive Analytics")
+    st.markdown("Upload your specific Historical Data (CSV) and Option Chain (CSV) to generate exact Monthly Returns, PCR, IV, and Options Support/Resistance.")
+    
+    col_opt, col_hist = st.columns(2)
+    with col_opt:
+        st.subheader("1. Options Data Input (NSE Format)")
+        option_file = st.file_uploader("Upload Option Chain CSV", type=['csv'], key="dd_opt_csv")
+    with col_hist:
+        st.subheader("2. Historical Data Input (1-2 Years)")
+        hist_file = st.file_uploader("Upload Historical Equity CSV", type=['csv'], key="dd_hist_csv")
+        
+    if st.button("Generate Deep-Dive Profile >"):
+        if option_file is not None or hist_file is not None:
+            # 1. Option Analytics Extraction
+            pcr_val, iv_val, opt_support, opt_resist = "N/A", "N/A", "N/A", "N/A"
+            if option_file is not None:
+                try:
+                    # NSE Format usually has 2 headers. Read skipping first
+                    opt_df = pd.read_csv(option_file, header=1)
+                    # Convert to numeric safely
+                    opt_df = opt_df.apply(pd.to_numeric, errors='coerce')
+                    
+                    # In standard NSE Option CSV (Skipping Row 0):
+                    # Index 1 = Call OI, Index 4 = Call IV, Index 11 = Strike
+                    # Index 17 = Put IV, Index 21 = Put OI
+                    call_oi_col = opt_df.iloc[:, 1]
+                    call_iv_col = opt_df.iloc[:, 4]
+                    strike_col = opt_df.iloc[:, 11]
+                    put_iv_col = opt_df.iloc[:, 17]
+                    put_oi_col = opt_df.iloc[:, 21]
+                    
+                    ce_oi_total = call_oi_col.sum()
+                    pe_oi_total = put_oi_col.sum()
+                    
+                    if ce_oi_total > 0: pcr_val = round(pe_oi_total / ce_oi_total, 2)
+                    
+                    iv_mean = pd.concat([call_iv_col, put_iv_col]).dropna().mean()
+                    iv_val = round(iv_mean, 2) if not pd.isna(iv_mean) else "N/A"
+                    
+                    # Support is Strike with Max Put OI, Resistance is Strike with Max Call OI
+                    max_put_idx = put_oi_col.idxmax()
+                    max_call_idx = call_oi_col.idxmax()
+                    opt_support = f"₹{strike_col.loc[max_put_idx]}" if not pd.isna(max_put_idx) else "N/A"
+                    opt_resist = f"₹{strike_col.loc[max_call_idx]}" if not pd.isna(max_call_idx) else "N/A"
+                except Exception as e:
+                    st.warning(f"Could not parse Options CSV as strict NSE format. {e}")
+                    
+            # UI Row 1
+            st.subheader("🎯 Options Profile (Derived from CSV)")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Options PCR", pcr_val)
+            k2.metric("Implied Vol (IV)", iv_val)
+            k3.metric("Max Put Support", opt_support)
+            k4.metric("Max Call Resistance", opt_resist)
+            st.divider()
+            
+            # 2. Historical Monthly Return
+            if hist_file is not None:
+                try:
+                    st.subheader("📅 Monthly Percentage Returns (Month-over-Month)")
+                    hist_df = pd.read_csv(hist_file)
+                    
+                    # Locate Date and Close Columns
+                    date_col = next((c for c in hist_df.columns if 'Date' in c), None)
+                    close_col = next((c for c in hist_df.columns if 'Close Price' in c or 'Close' in c), None)
+                    
+                    if date_col and close_col:
+                        hist_df[date_col] = pd.to_datetime(hist_df[date_col])
+                        hist_df = hist_df.sort_values(date_col)
+                        hist_df.set_index(date_col, inplace=True)
+                        
+                        # Resample to Month End
+                        montly_close = hist_df[close_col].resample('ME').last().dropna()
+                        monthly_ret = montly_close.pct_change() * 100
+                        
+                        m_df = monthly_ret.to_frame(name='Return').dropna()
+                        m_df['Month'] = m_df.index.strftime('%b %Y')
+                        
+                        # Create output strings: "Apr 2026: -10%"
+                        out_strings = []
+                        for idx, row in m_df.iterrows():
+                            val = row['Return']
+                            emoji = "🟢 Upward" if val > 0 else "🔴 Downward"
+                            out_strings.append(f"**{row['Month']}**: {round(val, 2)}% {emoji}")
+                        
+                        # Display in columns
+                        cols = st.columns(3)
+                        for i, txt in enumerate(reversed(out_strings)): # Show newest first
+                            cols[i % 3].markdown(txt)
+                            
+                        # Plot Bar
+                        colors = ['rgba(0, 255, 0, 0.6)' if val > 0 else 'rgba(255, 0, 0, 0.6)' for val in m_df['Return']]
+                        fig3 = go.Figure(data=[go.Bar(
+                            x=m_df['Month'], 
+                            y=m_df['Return'], 
+                            marker_color=colors,
+                            text=m_df['Return'].apply(lambda x: f"{round(x, 2)}%"),
+                            textposition='auto'
+                        )])
+                        fig3.update_layout(title="Historical Month-over-Month Returns vs Previous Month Close", template="plotly_dark", height=400)
+                        st.plotly_chart(fig3, use_container_width=True)
+                    else:
+                        st.warning("Could not find 'Date' or 'Close Price' in the historical CSV.")
+                except Exception as e:
+                    st.error(f"Error parsing Historical Data: {e}")
+        else:
+            st.info("Please upload at least one CSV to generate the profile.")
