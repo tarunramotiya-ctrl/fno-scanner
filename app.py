@@ -245,7 +245,8 @@ with tab2:
     colA, colB = st.columns([1, 3])
     with colA:
         test_stock = st.selectbox("Select Asset to Backtest", fno_tickers)
-        strategy = st.radio("Select Strategy Engine", ["EMA 9/20 Crossover", "RSI Oversold Bounce", "Bollinger Breakout"])
+        strategy_options = ["EMA 9/20 Crossover", "RSI Oversold Bounce", "Bollinger Breakout", "200 DMA Reversal", "VWAP Bounce/Reversal", "Combined Master (RSI + BB)", "🌟 Auto-Optimize (Test All)"]
+        strategy = st.radio("Select Strategy Engine", strategy_options)
         run_sim = st.button("Run Simulation >")
         
     if run_sim:
@@ -253,50 +254,98 @@ with tab2:
             hist_data = fetch_market_data([test_stock], period="2y", interval="1d").get(test_stock, pd.DataFrame()).copy()
             
             if not hist_data.empty:
-                if strategy == "EMA 9/20 Crossover":
-                    hist_data['EMA_9'] = hist_data['Close'].ewm(span=9).mean()
-                    hist_data['EMA_20'] = hist_data['Close'].ewm(span=20).mean()
-                    hist_data['Signal'] = np.where(hist_data['EMA_9'] > hist_data['EMA_20'], 1, -1)
-                    
-                elif strategy == "RSI Oversold Bounce":
-                    delta = hist_data['Close'].diff()
-                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                    rs = gain / loss
-                    hist_data['RSI'] = 100 - (100 / (1 + rs))
-                    # Buy when RSI < 35, Sell when RSI > 65
-                    hist_data['Signal'] = np.where(hist_data['RSI'] < 35, 1, np.where(hist_data['RSI'] > 65, -1, 0))
-                    hist_data['Signal'] = hist_data['Signal'].replace(to_replace=0, method='ffill')
-                    
-                elif strategy == "Bollinger Breakout":
-                    sma_20 = hist_data['Close'].rolling(20).mean()
-                    std_20 = hist_data['Close'].rolling(20).std()
-                    hist_data['Upper_BB'] = sma_20 + (2 * std_20)
-                    hist_data['Lower_BB'] = sma_20 - (2 * std_20)
-                    hist_data['Signal'] = np.where(hist_data['Close'] > hist_data['Upper_BB'], 1, np.where(hist_data['Close'] < hist_data['Lower_BB'], -1, 0))
-                    hist_data['Signal'] = hist_data['Signal'].replace(to_replace=0, method='ffill')
+                strats_to_run = ["EMA 9/20 Crossover", "RSI Oversold Bounce", "Bollinger Breakout", "200 DMA Reversal", "VWAP Bounce/Reversal", "Combined Master (RSI + BB)"] if "Auto-Optimize" in strategy else [strategy]
                 
-                hist_data['Position'] = hist_data['Signal'].shift() # We enter on next candle
-                hist_data['Strategy_Return'] = hist_data['Position'] * (hist_data['Close'].pct_change())
+                best_strat_name = ""
+                best_strat_ret = -9999.0
+                best_cum_strat = None
                 
-                # Cumulative Math
-                cum_strat = (1 + hist_data['Strategy_Return']).cumprod()
+                for s in strats_to_run:
+                    temp_data = hist_data.copy()
+                    if s == "EMA 9/20 Crossover":
+                        temp_data['EMA_9'] = temp_data['Close'].ewm(span=9).mean()
+                        temp_data['EMA_20'] = temp_data['Close'].ewm(span=20).mean()
+                        temp_data['Signal'] = np.where(temp_data['EMA_9'] > temp_data['EMA_20'], 1, -1)
+                        
+                    elif s == "RSI Oversold Bounce":
+                        delta = temp_data['Close'].diff()
+                        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                        rs = gain / loss
+                        temp_data['RSI'] = 100 - (100 / (1 + rs))
+                        temp_data['Signal'] = np.where(temp_data['RSI'] < 35, 1, np.where(temp_data['RSI'] > 65, -1, 0))
+                        temp_data['Signal'] = temp_data['Signal'].replace(to_replace=0, method='ffill')
+                        
+                    elif s == "Bollinger Breakout":
+                        sma_20 = temp_data['Close'].rolling(20).mean()
+                        std_20 = temp_data['Close'].rolling(20).std()
+                        temp_data['Upper_BB'] = sma_20 + (2 * std_20)
+                        temp_data['Lower_BB'] = sma_20 - (2 * std_20)
+                        temp_data['Signal'] = np.where(temp_data['Close'] > temp_data['Upper_BB'], 1, np.where(temp_data['Close'] < temp_data['Lower_BB'], -1, 0))
+                        temp_data['Signal'] = temp_data['Signal'].replace(to_replace=0, method='ffill')
+                        
+                    elif s == "200 DMA Reversal":
+                        temp_data['SMA_200'] = temp_data['Close'].rolling(200).mean()
+                        # Buy when Crossing UP over 200 DMA, Short when Crossing DOWN below 200 DMA
+                        temp_data['Signal'] = np.where((temp_data['Close'] > temp_data['SMA_200']) & (temp_data['Close'].shift(1) <= temp_data['SMA_200'].shift(1)), 1,
+                                              np.where((temp_data['Close'] < temp_data['SMA_200']) & (temp_data['Close'].shift(1) >= temp_data['SMA_200'].shift(1)), -1, 0))
+                        temp_data['Signal'] = temp_data['Signal'].replace(to_replace=0, method='ffill')
+                        
+                    elif s == "VWAP Bounce/Reversal":
+                        typical_price = (temp_data['High'] + temp_data['Low'] + temp_data['Close']) / 3
+                        # We use a 20-Day Anchored/Rolling VWAP approximation
+                        temp_data['VWAP_20'] = (typical_price * temp_data['Volume']).rolling(20).sum() / temp_data['Volume'].rolling(20).sum()
+                        temp_data['Signal'] = np.where((temp_data['Close'] > temp_data['VWAP_20']) & (temp_data['Close'].shift(1) <= temp_data['VWAP_20'].shift(1)), 1,
+                                              np.where((temp_data['Close'] < temp_data['VWAP_20']) & (temp_data['Close'].shift(1) >= temp_data['VWAP_20'].shift(1)), -1, 0))
+                        temp_data['Signal'] = temp_data['Signal'].replace(to_replace=0, method='ffill')
+                        
+                    elif s == "Combined Master (RSI + BB)":
+                        sma_20 = temp_data['Close'].rolling(20).mean()
+                        std_20 = temp_data['Close'].rolling(20).std()
+                        upper_bb = sma_20 + (2 * std_20)
+                        lower_bb = sma_20 - (2 * std_20)
+                        
+                        delta = temp_data['Close'].diff()
+                        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                        rs = gain / loss
+                        rsi = 100 - (100 / (1 + rs))
+                        
+                        # Master logic: Buy when breaking out OR deeply oversold. Sell when crashing OR deeply overbought.
+                        temp_data['Signal'] = np.where((rsi < 35) | (temp_data['Close'] > upper_bb), 1, 
+                                              np.where((rsi > 65) | (temp_data['Close'] < lower_bb), -1, 0))
+                        temp_data['Signal'] = temp_data['Signal'].replace(to_replace=0, method='ffill')
+                
+                    temp_data['Position'] = temp_data['Signal'].shift()
+                    temp_data['Strategy_Return'] = temp_data['Position'] * (temp_data['Close'].pct_change())
+                    
+                    cum_strat = (1 + temp_data['Strategy_Return']).cumprod()
+                    end_ret = round((cum_strat.iloc[-1] - 1) * 100, 2) if not pd.isna(cum_strat.iloc[-1]) else 0
+                    
+                    if end_ret > best_strat_ret:
+                        best_strat_ret = end_ret
+                        best_strat_name = s
+                        best_cum_strat = cum_strat
+                
+                # Execute Best Plot
                 cum_bh = (1 + hist_data['Close'].pct_change()).cumprod()
+                
+                if "Auto-Optimize" in strategy:
+                    st.success(f"🏆 Auto-Optimization Complete! The absolute best strategy for {test_stock} is **{best_strat_name}** with a {best_strat_ret}% Return.")
                 
                 # Plot
                 fig2 = go.Figure()
-                fig2.add_trace(go.Scatter(x=hist_data.index, y=cum_strat, line=dict(color='green', width=2), name="Strategy Equity Curve"))
+                fig2.add_trace(go.Scatter(x=hist_data.index, y=best_cum_strat, line=dict(color='green', width=2), name=f"{best_strat_name} Equity"))
                 fig2.add_trace(go.Scatter(x=hist_data.index, y=cum_bh, line=dict(color='gray', width=1, dash='dash'), name="Hold Equity Curve"))
-                fig2.update_layout(title=f"{test_stock} Trading Output", height=500, template="plotly_dark")
+                fig2.update_layout(title=f"{test_stock} Trading Output ({best_strat_name})", height=500, template="plotly_dark")
                 
                 st.plotly_chart(fig2, use_container_width=True)
                 
                 # Metrics
-                end_strat = round((cum_strat.iloc[-1] - 1) * 100, 2) if not pd.isna(cum_strat.iloc[-1]) else 0
                 end_bh = round((cum_bh.iloc[-1] - 1) * 100, 2) if not pd.isna(cum_bh.iloc[-1]) else 0
                 
                 m1, m2 = st.columns(2)
-                m1.metric("Strategy Total Return", f"{end_strat}%")
+                m1.metric(f"Winner: {best_strat_name}", f"{best_strat_ret}%")
                 m2.metric("Buy & Hold Return", f"{end_bh}%")
             else:
                 st.error("Failed to load historical data for simulation.")
