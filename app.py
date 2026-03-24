@@ -33,8 +33,10 @@ else:
 st.sidebar.title("⚙️ Pro Control Panel")
 
 st.sidebar.header("1. Filter Watchlist:")
-selected_tickers = st.sidebar.multiselect("Limit scan to specific stocks:", options=fno_tickers, default=[])
-tickers_to_scan = selected_tickers if selected_tickers else fno_tickers
+st.sidebar.caption("By default, we scan the top 10 stocks. Type below to add more, or use the Deep-Dive tab to manually search 1 stock instantly.")
+safe_default = fno_tickers[:10] if len(fno_tickers) >= 10 else fno_tickers
+selected_tickers = st.sidebar.multiselect("Target Specific Stocks:", options=fno_tickers, default=safe_default)
+tickers_to_scan = selected_tickers if selected_tickers else safe_default
 
 st.sidebar.header("2. Live NSE Options Data")
 st.sidebar.caption("The engine will automatically scrape the exact Put-Call ratio direct from NSE servers for your Top 12 stocks.")
