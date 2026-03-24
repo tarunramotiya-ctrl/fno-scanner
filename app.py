@@ -302,7 +302,11 @@ with tab2:
 # --- TAB 3: DEEP-DIVE PROFILE ---
 with tab3:
     st.header("Single Stock Deep-Dive Analytics")
-    st.markdown("Upload your specific Historical Data (CSV) and Option Chain (CSV) to generate exact Monthly Returns, PCR, IV, and Options Support/Resistance.")
+    st.markdown("Upload your Option Chain (CSV) to generate exact Monthly Returns, PCR, IV, and Options Support/Resistance.")
+    
+    col_sel, col_up = st.columns(2)
+    with col_sel:
+        focus_stock = st.selectbox("Select Target Asset", fno_tickers, key="dd_stock")
     
     col_opt, col_hist = st.columns(2)
     with col_opt:
@@ -313,57 +317,78 @@ with tab3:
         st.success("Historical Volatility & Net Change calculations are now fully automated! No CSV upload required.")
         
     if st.button("Generate Deep-Dive Profile >"):
-        if True: # Always process History even without Options CSV
+        with st.spinner(f"Analyzing {focus_stock} 3-Year History..."):
+            hd = fetch_market_data([focus_stock], period="3y", interval="1d").get(focus_stock, pd.DataFrame()).copy()
+            
+        if hd.empty:
+            st.error(f"Failed to fetch data for {focus_stock} from Yahoo Finance.")
+        else:
+            current_price = hd['Close'].iloc[-1]
+            
             # 1. Option Analytics Extraction
             pcr_val, iv_val, opt_support, opt_resist = "N/A", "N/A", "N/A", "N/A"
             ext_support, ext_resist = "N/A", "N/A" # Extended (S2/R2)
             
             if option_file is not None:
                 try:
-                    # NSE Format usually has 2 headers. Read skipping first
-                    opt_df = pd.read_csv(option_file, header=1)
+                    import io
+                    raw_bytes = option_file.getvalue()
+                    try:
+                        opt_text = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        opt_text = raw_bytes.decode('latin-1')
+                        
+                    lines = opt_text.split('\n')
+                    # Find header row containing STRIKE
+                    header_idx = 0
+                    for i, line in enumerate(lines):
+                        if "STRIKE" in line.upper():
+                            header_idx = i
+                            break
+                            
+                    opt_df = pd.read_csv(io.StringIO(opt_text), header=header_idx)
                     
-                    # Dynamically find columns
-                    colnames = list(opt_df.columns)
-                    strike_idx = next((i for i, x in enumerate(colnames) if "STRIKE" in str(x).upper()), None)
-                    oi_indices = [i for i, x in enumerate(colnames) if str(x).strip().upper() == "OI" or "OPEN INT" in str(x).upper()]
-                    iv_indices = [i for i, x in enumerate(colnames) if str(x).strip().upper() == "IV"]
+                    colnames = [str(x).upper().strip() for x in opt_df.columns]
+                    strike_idx = next((i for i, x in enumerate(colnames) if "STRIKE" in x), None)
+                    
+                    # Usually: Index 1 is CE OI, Index 21 is PE OI. 
+                    oi_indices = [i for i, x in enumerate(colnames) if x in ["OI", "OI.1"] or ("OPEN INT" in x and "CH" not in x)]
+                    iv_indices = [i for i, x in enumerate(colnames) if "IV" in x and "CH" not in x]
                     
                     if strike_idx is not None and len(oi_indices) >= 2:
-                        # Clean commas and convert to numeric
-                        call_oi_col = pd.to_numeric(opt_df.iloc[:, oi_indices[0]].astype(str).str.replace(',', ''), errors='coerce')
-                        put_oi_col = pd.to_numeric(opt_df.iloc[:, oi_indices[-1]].astype(str).str.replace(',', ''), errors='coerce')
-                        strike_col = pd.to_numeric(opt_df.iloc[:, strike_idx].astype(str).str.replace(',', ''), errors='coerce')
+                        call_oi_col = pd.to_numeric(opt_df.iloc[:, oi_indices[0]].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
+                        put_oi_col = pd.to_numeric(opt_df.iloc[:, oi_indices[-1]].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
+                        strike_col = pd.to_numeric(opt_df.iloc[:, strike_idx].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
                         
                         ce_oi_total = call_oi_col.sum()
                         pe_oi_total = put_oi_col.sum()
                         
                         if ce_oi_total > 0: pcr_val = round(pe_oi_total / ce_oi_total, 2)
                         
-                        # IV
                         if len(iv_indices) >= 2:
-                            call_iv = pd.to_numeric(opt_df.iloc[:, iv_indices[0]].astype(str).str.replace(',', ''), errors='coerce')
-                            put_iv = pd.to_numeric(opt_df.iloc[:, iv_indices[-1]].astype(str).str.replace(',', ''), errors='coerce')
+                            call_iv = pd.to_numeric(opt_df.iloc[:, iv_indices[0]].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
+                            put_iv = pd.to_numeric(opt_df.iloc[:, iv_indices[-1]].astype(str).str.replace(r'[^\d.-]', '', regex=True), errors='coerce')
                             iv_mean = pd.concat([call_iv, put_iv]).dropna().mean()
-                            iv_val = round(iv_mean, 2) if not pd.isna(iv_mean) else "N/A"
+                            if not pd.isna(iv_mean): iv_val = round(iv_mean, 2)
                         
-                        # Support is Strike with Max Put OI
-                        put_oi_sorted = put_oi_col.sort_values(ascending=False)
-                        if len(put_oi_sorted) > 0:
-                            opt_support = f"₹{strike_col.loc[put_oi_sorted.index[0]]}"
-                            if len(put_oi_sorted) > 1: ext_support = f"₹{strike_col.loc[put_oi_sorted.index[1]]}"
+                        # Max Support logic (Top put OI strikes)
+                        valid_put_oi = put_oi_col.dropna()
+                        valid_call_oi = call_oi_col.dropna()
                         
-                        # Resistance is Strike with Max Call OI
-                        call_oi_sorted = call_oi_col.sort_values(ascending=False)
-                        if len(call_oi_sorted) > 0:
-                            opt_resist = f"₹{strike_col.loc[call_oi_sorted.index[0]]}"
-                            if len(call_oi_sorted) > 1: ext_resist = f"₹{strike_col.loc[call_oi_sorted.index[1]]}"
-                        
+                        if not valid_put_oi.empty:
+                            put_sorted = valid_put_oi.sort_values(ascending=False)
+                            opt_support = f"₹{strike_col.loc[put_sorted.index[0]]}"
+                            if len(put_sorted) > 1: ext_support = f"₹{strike_col.loc[put_sorted.index[1]]}"
+                            
+                        if not valid_call_oi.empty:
+                            call_sorted = valid_call_oi.sort_values(ascending=False)
+                            opt_resist = f"₹{strike_col.loc[call_sorted.index[0]]}"
+                            if len(call_sorted) > 1: ext_resist = f"₹{strike_col.loc[call_sorted.index[1]]}"
                 except Exception as e:
-                    st.warning(f"Could not parse Options CSV as strict NSE format. {e}")
-                    
+                    st.warning(f"Could not parse Options CSV. Found error: {e}")
+
             # UI Row 1
-            st.subheader("🎯 Options Profile (Derived from CSV)")
+            st.subheader(f"🎯 Options Profile for {focus_stock} (Derived from CSV)")
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Options PCR", pcr_val)
             k2.metric("Implied Vol (IV)", iv_val)
@@ -374,66 +399,35 @@ with tab3:
             # 2. Automated Historical Monthly Return (User's Custom Algorithm)
             st.subheader("📅 Monthly Percentage Returns & Volatility (Custom Alg)")
             try:
-                # Use the already downloaded 5-year historical data 'hd'
-                monthly_data = hd.resample('ME').agg({
-                    'Open': 'first',
-                    'High': 'max',
-                    'Low': 'min',
-                    'Close': 'last'
-                })
-                
-                # 1. Volatility % (Swing)
+                monthly_data = hd.resample('ME').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last'})
                 monthly_data['Volatility % (Swing)'] = ((monthly_data['High'] - monthly_data['Low']) / monthly_data['Low']) * 100
-                
-                # 2. Net Change % (Direction)
                 monthly_data['Net Change % (Direction)'] = ((monthly_data['Close'] - monthly_data['Open']) / monthly_data['Open']) * 100
-                
-                # Clean up the numbers
                 monthly_data['Volatility % (Swing)'] = monthly_data['Volatility % (Swing)'].round(2)
                 monthly_data['Net Change % (Direction)'] = monthly_data['Net Change % (Direction)'].round(2)
                 
-                # Sort from Newest Month to Oldest Month
                 monthly_data = monthly_data.sort_index(ascending=False)
                 monthly_data['Month_Str'] = monthly_data.index.strftime('%B %Y')
                 
-                # Create Output Strings
                 out_strings = []
-                for idx, row in monthly_data.head(12).iterrows(): # Show last 12 months
+                for idx, row in monthly_data.head(12).iterrows():
                     val = row['Net Change % (Direction)']
                     vol = row['Volatility % (Swing)']
                     emoji = "🟢 Upward" if val > 0 else "🔴 Downward"
                     out_strings.append(f"**{row['Month_Str']}**: {val}% {emoji}  \n*(Swing: {vol}%)*")
                 
-                # Display in columns
                 if out_strings:
                     cols = st.columns(3)
                     for i, txt in enumerate(out_strings):
                         cols[i % 3].markdown(txt)
                         
-                    # Plot Bar for Net Change
-                    m_df = monthly_data.head(12).copy()
-                    m_df = m_df.sort_index(ascending=True) # Chronological for plotting
-                    
+                    m_df = monthly_data.head(12).copy().sort_index(ascending=True)
                     colors = ['rgba(0, 255, 0, 0.6)' if val > 0 else 'rgba(255, 0, 0, 0.6)' for val in m_df['Net Change % (Direction)']]
-                    fig3 = go.Figure()
-                    fig3.add_trace(go.Bar(
-                        x=m_df['Month_Str'],
-                        y=m_df['Net Change % (Direction)'],
-                        marker_color=colors,
-                        name="Net Change %"
-                    ))
-                    fig3.add_trace(go.Scatter(
-                        x=m_df['Month_Str'],
-                        y=m_df['Volatility % (Swing)'],
-                        mode='lines+markers',
-                        line=dict(color='yellow', width=2),
-                        name="Volatility % (Swing)"
-                    ))
                     
+                    fig3 = go.Figure()
+                    fig3.add_trace(go.Bar(x=m_df['Month_Str'], y=m_df['Net Change % (Direction)'], marker_color=colors, name="Net Change %"))
+                    fig3.add_trace(go.Scatter(x=m_df['Month_Str'], y=m_df['Volatility % (Swing)'], mode='lines+markers', line=dict(color='yellow', width=2), name="Volatility % (Swing)"))
                     fig3.update_layout(title="Historical Monthly Net Change vs Volatility Swing", template="plotly_dark", height=400, barmode='group')
                     st.plotly_chart(fig3, use_container_width=True)
                     
             except Exception as e:
                 st.error(f"Error calculating Automated Historical Data: {e}")
-        else:
-            st.info("Please upload your NSE Options CSV to analyze Options PCR/IV.")
