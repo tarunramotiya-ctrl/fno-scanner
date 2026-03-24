@@ -173,7 +173,7 @@ def load_and_process_data(tickers, scrape_options):
     return pd.DataFrame(), market_data
 
 # --- APP LAYOUT (TABS) ---
-tab1, tab2, tab3 = st.tabs(["📊 Live Market Scanner", "🔄 Strategy Backtester", "🔍 Stock Deep-Dive"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Live Market Scanner", "🔄 Strategy Backtester", "🔍 Stock Deep-Dive", "🏢 Portfolio Matrix"])
 
 # --- TAB 1: LIVE SCANNER ---
 with tab1:
@@ -486,3 +486,130 @@ with tab3:
                     
             except Exception as e:
                 st.error(f"Error calculating Automated Historical Data: {e}")
+
+# --- TAB 4: PORTFOLIO MATRIX SCREENER ---
+with tab4:
+    st.header("🏢 Mass Automated Strategy Matrix")
+    st.markdown("Batch scan all F&O stocks across 6 Strategies and 5 Macro-Timeframes to mathematically enforce your Institutional Rules. Generates the final CSV DataFrame.")
+    
+    if st.button("🚀 Run Master Matrix Calculation"):
+        with st.spinner("Executing 6,000 simulations... Please leave this tab open until complete."):
+            
+            # Fetch globally to prevent threaded timeout (download 10 years for all)
+            df_full = fetch_market_data(fno_tickers, period="10y", interval="1d")
+            
+            rule_map = {
+                '1y': (252, 17.0),
+                '2y': (504, 35.0),
+                '3y': (756, 50.0),
+                '5y': (1260, 100.0),
+                '10y': (2520, 200.0)
+            }
+            
+            strategies = [
+                "EMA 9/20 Crossover", "RSI Oversold Bounce", "Bollinger Breakout", 
+                "200 DMA Reversal", "VWAP Bounce/Reversal", "Combined Master (RSI + BB)"
+            ]
+            
+            results_dict = {strat: [] for strat in strategies}
+            
+            prog_bar = st.progress(0)
+            status_text = st.empty()
+            tot_stocks = len(fno_tickers)
+            
+            for i, ticker in enumerate(fno_tickers):
+                prog_bar.progress((i + 1) / tot_stocks)
+                status_text.text(f"Crunching Mathematics for {ticker} ({i+1}/{tot_stocks})...")
+                
+                stock_data = df_full.get(ticker, pd.DataFrame())
+                # Need absolute minimum 200 days to even test 1 year
+                if stock_data.empty or len(stock_data) < 200: continue
+                
+                for s in strategies:
+                    passed_timeframes = []
+                    
+                    for tf_label, (days_cut, min_thresh) in rule_map.items():
+                        sliced_data = stock_data.tail(days_cut).copy()
+                        
+                        # Only proceed if there is enough historical data for this specific timeframe!
+                        if len(sliced_data) < (days_cut * 0.8): continue
+                        
+                        # Apply specific mathematical logic to sliced_data
+                        if s == "EMA 9/20 Crossover":
+                            sliced_data['EMA_9'] = sliced_data['Close'].ewm(span=9).mean()
+                            sliced_data['EMA_20'] = sliced_data['Close'].ewm(span=20).mean()
+                            sliced_data['Signal'] = np.where(sliced_data['EMA_9'] > sliced_data['EMA_20'], 1, -1)
+                        elif s == "RSI Oversold Bounce":
+                            delta = sliced_data['Close'].diff()
+                            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                            rs = gain / loss
+                            sliced_data['RSI'] = 100 - (100 / (1 + rs))
+                            sliced_data['Signal'] = np.where(sliced_data['RSI'] < 35, 1, np.where(sliced_data['RSI'] > 65, -1, 0))
+                            sliced_data['Signal'] = sliced_data['Signal'].replace(to_replace=0, method='ffill')
+                        elif s == "Bollinger Breakout":
+                            sma_20 = sliced_data['Close'].rolling(20).mean()
+                            std_20 = sliced_data['Close'].rolling(20).std()
+                            upper_bb = sma_20 + (2 * std_20)
+                            lower_bb = sma_20 - (2 * std_20)
+                            sliced_data['Signal'] = np.where(sliced_data['Close'] > upper_bb, 1, np.where(sliced_data['Close'] < lower_bb, -1, 0))
+                            sliced_data['Signal'] = sliced_data['Signal'].replace(to_replace=0, method='ffill')
+                        elif s == "200 DMA Reversal":
+                            sma_200 = sliced_data['Close'].rolling(200).mean()
+                            sliced_data['Signal'] = np.where((sliced_data['Close'] > sma_200) & (sliced_data['Close'].shift(1) <= sma_200.shift(1)), 1,
+                                                      np.where((sliced_data['Close'] < sma_200) & (sliced_data['Close'].shift(1) >= sma_200.shift(1)), -1, 0))
+                            sliced_data['Signal'] = sliced_data['Signal'].replace(to_replace=0, method='ffill')
+                        elif s == "VWAP Bounce/Reversal":
+                            typical_price = (sliced_data['High'] + sliced_data['Low'] + sliced_data['Close']) / 3
+                            vwap_20 = (typical_price * sliced_data['Volume']).rolling(20).sum() / sliced_data['Volume'].rolling(20).sum()
+                            sliced_data['Signal'] = np.where((sliced_data['Close'] > vwap_20) & (sliced_data['Close'].shift(1) <= vwap_20.shift(1)), 1,
+                                                      np.where((sliced_data['Close'] < vwap_20) & (sliced_data['Close'].shift(1) >= vwap_20.shift(1)), -1, 0))
+                            sliced_data['Signal'] = sliced_data['Signal'].replace(to_replace=0, method='ffill')
+                        elif s == "Combined Master (RSI + BB)":
+                            sma_20 = sliced_data['Close'].rolling(20).mean()
+                            std_20 = sliced_data['Close'].rolling(20).std()
+                            upper_bb = sma_20 + (2 * std_20)
+                            lower_bb = sma_20 - (2 * std_20)
+                            delta = sliced_data['Close'].diff()
+                            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                            rs = gain / loss
+                            rsi = 100 - (100 / (1 + rs))
+                            sliced_data['Signal'] = np.where((rsi < 35) | (sliced_data['Close'] > upper_bb), 1, 
+                                                      np.where((rsi > 65) | (sliced_data['Close'] < lower_bb), -1, 0))
+                            sliced_data['Signal'] = sliced_data['Signal'].replace(to_replace=0, method='ffill')
+                            
+                        sliced_data['Position'] = sliced_data['Signal'].shift()
+                        sliced_data['Strategy_Return'] = sliced_data['Position'] * (sliced_data['Close'].pct_change())
+                        cum_strat = (1 + sliced_data['Strategy_Return']).cumprod()
+                        
+                        if len(cum_strat) > 0 and not pd.isna(cum_strat.iloc[-1]):
+                            end_ret = round((cum_strat.iloc[-1] - 1) * 100, 2)
+                            if end_ret > min_thresh:
+                                passed_timeframes.append(tf_label.upper())
+                                
+                    if passed_timeframes:
+                        clean_symbol = ticker.replace('.NS', '')
+                        results_dict[s].append(f"{clean_symbol}({','.join(passed_timeframes)})")
+                        
+            # Pad arrays for DataFrame conversion
+            max_len = max([len(v) for v in results_dict.values()]) if results_dict else 0
+            if max_len > 0:
+                for k in results_dict.keys():
+                    while len(results_dict[k]) < max_len:
+                        results_dict[k].append("")
+                        
+                final_df = pd.DataFrame(results_dict)
+                status_text.empty()
+                st.success("🎉 Matrix Computation Complete! View the results below.")
+                st.dataframe(final_df, use_container_width=True)
+                
+                csv_bytes = final_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Excel Matrix",
+                    data=csv_bytes,
+                    file_name="Master_Strategy_Matrix.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.warning("No stocks passed the intense mathematical thresholds.")
