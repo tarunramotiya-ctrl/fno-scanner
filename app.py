@@ -153,21 +153,43 @@ def load_and_process_data(tickers, scrape_options):
         support = df_levels['Support'].iloc[-1] if not df_levels.empty else current_price
         resistance = df_levels['Resistance'].iloc[-1] if not df_levels.empty else current_price
         
-        lower_bound, upper_bound, _ = calculate_expiration_range(df, days_to_expiry=20)
+        # --- MTFA BREAKOUT & REVERSAL ENGINE ---
+        signal_type = "➖ NONE"
+        
+        bb_width_series = (df['Close'].rolling(20).mean() + 2*df['Close'].rolling(20).std() - (df['Close'].rolling(20).mean() - 2*df['Close'].rolling(20).std())) / df['Close'].rolling(20).mean()
+        bb_width_20d_avg = bb_width_series.mean() if not bb_width_series.empty else 0.1
+        is_squeezed = bb_width < (bb_width_20d_avg * 0.8)
+        
+        recent_20d_low = df['Low'].rolling(20).min().shift(1).iloc[-1]
+        is_breaking_up = current_price >= recent_20d_high
+        is_breaking_down = current_price <= recent_20d_low
+        has_volume = vol_spike > 2.5
+        
+        if is_squeezed and is_breaking_up and has_volume and hourly_trend == "BULL 🟢":
+            signal_type = "🚀 BULL BREAKOUT"
+            score += 50
+        elif is_squeezed and is_breaking_down and has_volume and hourly_trend == "BEAR 🔴":
+            signal_type = "🩸 BEAR BREAKOUT"
+            score += 50
+            
+        std_val = df['Close'].rolling(window=20).std().iloc[-1]
+        if current_price > (upper_bb + std_val) and current_rsi > 80:
+            signal_type = "🧨 BEAR REVERSAL"
+        elif current_price < (lower_bb - std_val) and current_rsi < 20:
+            signal_type = "🔥 BULL REVERSAL"
         
         results.append({
             "Ticker": ticker,
+            "MTFA_Signal": signal_type,
             "1H_Trend": hourly_trend,
-            "RS_Rating": rs_rating,
-            "Daily_MACD": "BULL 📈" if macd_hist > 0 else "BEAR 📉",
             "Score": round(score, 2),
             "Price": round(current_price, 2),
-            "RSI_14": round(current_rsi, 1),
             "Vol_Spike": f"{round(vol_spike, 1)}x",
+            "RSI_14": round(current_rsi, 1),
+            "Daily_MACD": "BULL 📈" if macd_hist > 0 else "BEAR 📉",
+            "RS_Rating": rs_rating,
             "Support": round(support, 2),
-            "Resistance": round(resistance, 2),
-            "Exp_Lower": lower_bound,
-            "Exp_Upper": upper_bound
+            "Resistance": round(resistance, 2)
         })
         
     df_results = pd.DataFrame(results)
@@ -196,6 +218,13 @@ with tab1:
         top_12_df, full_market_data = load_and_process_data(tickers_to_scan, fetch_options)
 
     if not top_12_df.empty:
+        # Highlight explicit breakouts first
+        breakouts = top_12_df[top_12_df["MTFA_Signal"] != "➖ NONE"]
+        if not breakouts.empty:
+            st.error(f"🚨 SYSTEM ALERT: {len(breakouts)} MASSIVE STRUCTURAL SETUPS DETECTED TRADING TODAY")
+            st.dataframe(breakouts, hide_index=True, use_container_width=True)
+            st.divider()
+            
         st.subheader(f"🚀 Top Actionable Stocks ({len(top_12_df)} symbols)")
         
         # Render the ultimate DataFrame
@@ -209,7 +238,7 @@ with tab1:
         if tg_token and tg_chat_id:
             msg = "⚡ *PRO SCANNER EXCLUSIVE* ⚡\n\n"
             for r in top_12_df.itertuples():
-                msg += f"*{r.Ticker}* | Score: {r.Score} | RSI: {r.RSI_14} | 1H: {r._2}\n"
+                msg += f"*{r.Ticker}* | {r.MTFA_Signal} | Score: {r.Score} | RSI: {r.RSI_14}\n"
                 
             url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
             if st.button("Dispatch Alert to Telegram Channel ✉️"):
