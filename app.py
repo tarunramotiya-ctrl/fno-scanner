@@ -178,6 +178,8 @@ def load_and_process_data(tickers, scrape_options):
         elif current_price < (lower_bb - std_val) and current_rsi < 20:
             signal_type = "🔥 BULL REVERSAL"
         
+        lower_bound, upper_bound, _ = calculate_expiration_range(df, days_to_expiry=20)
+        
         results.append({
             "Ticker": ticker,
             "MTFA_Signal": signal_type,
@@ -189,7 +191,9 @@ def load_and_process_data(tickers, scrape_options):
             "Daily_MACD": "BULL 📈" if macd_hist > 0 else "BEAR 📉",
             "RS_Rating": rs_rating,
             "Support": round(support, 2),
-            "Resistance": round(resistance, 2)
+            "Resistance": round(resistance, 2),
+            "Exp_Lower": lower_bound,
+            "Exp_Upper": upper_bound
         })
         
     df_results = pd.DataFrame(results)
