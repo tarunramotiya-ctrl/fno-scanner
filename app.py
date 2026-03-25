@@ -10,6 +10,20 @@ from datetime import datetime
 # --- SETTINGS ---
 st.set_page_config(page_title="Indian F&O Scanner Pro", layout="wide")
 
+st.markdown("""
+<style>
+/* Institutional Pro Terminal CSS Core */
+[data-testid="stAppViewContainer"] { background-color: #0b0e14; }
+[data-testid="stSidebar"] { background-color: #11141c; border-right: 1px solid #1e2532; }
+[data-testid="stMetricValue"] { font-family: 'Consolas', 'Courier New', monospace; font-size: 1.8rem !important; color: #d1d4dc; }
+[data-testid="stMetricLabel"] { font-weight: 600; color: #8b929e; text-transform: uppercase; font-size: 0.8rem; }
+hr { border-color: #1e2532 !important; }
+h1, h2, h3, h4, h5 { color: #d1d4dc !important; font-family: -apple-system, system-ui, sans-serif !important; }
+div.stButton > button:first-child { background-color: #2962ff; color: white; border: none; font-weight: bold; }
+div.stButton > button:hover { background-color: #1e4bd8; color: white; }
+</style>
+""", unsafe_allow_html=True)
+
 # Import custom modules
 from scanner import fetch_market_data, fetch_nse_live_options
 from vol_profile import calculate_levels
@@ -632,24 +646,61 @@ with tab5:
             banknifty_df = idx_data.get("^NSEBANK", pd.DataFrame())
             
             if not nifty_df.empty and not banknifty_df.empty:
-                chart_col1, chart_col2 = st.columns(2)
-                
-                for title, df, col, color_th in [("NIFTY 50 (^NSEI)", nifty_df, chart_col1, '#00d4ff'), ("BANKNIFTY (^NSEBANK)", banknifty_df, chart_col2, '#ff9900')]:
+                for title, df in [("NIFTY 50 (^NSEI)", nifty_df), ("BANKNIFTY (^NSEBANK)", banknifty_df)]:
                     df_plot = df.copy()
                     df_plot['EMA_9'] = df_plot['Close'].ewm(span=9, adjust=False).mean()
                     df_plot['EMA_20'] = df_plot['Close'].ewm(span=20, adjust=False).mean()
                     
-                    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
-                    fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="Price"), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_9'], line=dict(color='cyan', width=1.5), name='9 EMA'), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_20'], line=dict(color='magenta', width=1.5), name='20 EMA'), row=1, col=1)
+                    # MACD
+                    ema_12 = df_plot['Close'].ewm(span=12, adjust=False).mean()
+                    ema_26 = df_plot['Close'].ewm(span=26, adjust=False).mean()
+                    macd = ema_12 - ema_26
+                    signal = macd.ewm(span=9, adjust=False).mean()
+                    macd_hist = macd - signal
                     
-                    colors = ['rgba(0, 255, 0, 0.5)' if c >= o else 'rgba(255, 0, 0, 0.5)' for c, o in zip(df_plot['Close'], df_plot['Open'])]
+                    # RSI
+                    delta = df_plot['Close'].diff()
+                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                    rs = gain / loss
+                    rsi = 100 - (100 / (1 + rs))
+                    
+                    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.02, row_heights=[0.55, 0.15, 0.15, 0.15])
+                    
+                    # Candlestick
+                    fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="Price", increasing_line_color='#26a69a', decreasing_line_color='#ef5350'), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_9'], line=dict(color='#2196f3', width=1.5), name='9 EMA'), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_20'], line=dict(color='#ff9800', width=1.5), name='20 EMA'), row=1, col=1)
+                    
+                    # Volume
+                    colors = ['rgba(38, 166, 154, 0.5)' if c >= o else 'rgba(239, 83, 80, 0.5)' for c, o in zip(df_plot['Close'], df_plot['Open'])]
                     fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], marker_color=colors, name="Volume"), row=2, col=1)
                     
-                    fig.update_layout(title=title, xaxis_rangeslider_visible=False, height=500, showlegend=False, template="plotly_dark")
-                    with col:
-                        st.plotly_chart(fig, use_container_width=True)
+                    # MACD
+                    fig.add_trace(go.Scatter(x=df_plot.index, y=macd, line=dict(color='#2962ff', width=1), name='MACD'), row=3, col=1)
+                    fig.add_trace(go.Scatter(x=df_plot.index, y=signal, line=dict(color='#ff6d00', width=1), name='Signal'), row=3, col=1)
+                    macd_colors = ['#26a69a' if val >= 0 else '#ef5350' for val in macd_hist]
+                    fig.add_trace(go.Bar(x=df_plot.index, y=macd_hist, marker_color=macd_colors, name="Histogram"), row=3, col=1)
+                    
+                    # RSI
+                    fig.add_trace(go.Scatter(x=df_plot.index, y=rsi, line=dict(color='#b22833', width=1.5), name='RSI 14'), row=4, col=1)
+                    fig.add_hline(y=70, line_dash="dash", line_color="#363a45", row=4, col=1)
+                    fig.add_hline(y=30, line_dash="dash", line_color="#363a45", row=4, col=1)
+                    
+                    fig.update_layout(
+                        title=f"{title} - Institutional Profile", 
+                        xaxis_rangeslider_visible=False, 
+                        height=800, 
+                        showlegend=False, 
+                        plot_bgcolor='#131722', 
+                        paper_bgcolor='#131722',
+                        font=dict(color='#d1d4dc'),
+                        margin=dict(l=10, r=10, t=40, b=10)
+                    )
+                    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#1e222d', zeroline=False)
+                    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#1e222d', zeroline=False)
+                    
+                    st.plotly_chart(fig, use_container_width=True)
             else:
                 st.error("Could not fetch data for both indices. Please try again.")
 
@@ -697,10 +748,16 @@ with tab5:
                 sim_data = fetch_market_data([sim_asset], period=sim_history, interval="1d").get(sim_asset, pd.DataFrame())
                 if not sim_data.empty:
                     if index_strat == "Intraday Gap Fade":
-                        fig_strat, strat_ret = run_gap_fade_strategy(sim_data)
+                        fig_strat, stats = run_gap_fade_strategy(sim_data)
                         if fig_strat:
                             st.plotly_chart(fig_strat, use_container_width=True)
-                            st.success(f"Signal Strategy Final Return: **{strat_ret}%**")
+                            st.subheader("Institutional Strategy Tear Sheet")
+                            m1, m2, m3, m4, m5 = st.columns(5)
+                            m1.metric("Net Return", f"{stats['Return']}%")
+                            m2.metric("Sharpe Ratio", stats['Sharpe'])
+                            m3.metric("Max Drawdown", f"{stats['Max Drawdown']}%")
+                            m4.metric("Win Rate", f"{stats['Win Rate']}%")
+                            m5.metric("Profit Factor", stats['Profit Factor'])
                         else:
                             st.error("Not enough data to run strategy.")
                     else:
