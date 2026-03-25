@@ -14,6 +14,7 @@ st.set_page_config(page_title="Indian F&O Scanner Pro", layout="wide")
 from scanner import fetch_market_data, fetch_nse_live_options
 from vol_profile import calculate_levels
 from option_range import calculate_expiration_range
+from index_simulator import run_monte_carlo, run_gap_fade_strategy
 
 st.title("📈 Institutional F&O Trading Engine")
 st.markdown("Advanced MTFA Scanner, Options Analytics, Backtesting, & Telegram Integration.")
@@ -173,7 +174,7 @@ def load_and_process_data(tickers, scrape_options):
     return pd.DataFrame(), market_data
 
 # --- APP LAYOUT (TABS) ---
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Live Market Scanner", "🔄 Strategy Backtester", "🔍 Stock Deep-Dive", "🏢 Portfolio Matrix"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Live Market Scanner", "🔄 Strategy Backtester", "🔍 Stock Deep-Dive", "🏢 Portfolio Matrix", "📈 Index Analytics", "🧮 Index Lab"])
 
 # --- TAB 1: LIVE SCANNER ---
 with tab1:
@@ -613,3 +614,117 @@ with tab4:
                 )
             else:
                 st.warning("No stocks passed the intense mathematical thresholds.")
+
+# --- TAB 5: INDEX ANALYTICS ---
+with tab5:
+    st.header("📈 Nifty 50 & BankNifty Analytics")
+    st.markdown("Comparative performance and technical analysis for major Indian indices.")
+    
+    col_idx1, col_idx2 = st.columns(2)
+    with col_idx1:
+        idx_period = st.selectbox("Select History Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3, key="idx_period")
+    
+    if st.button("Generate Index Charts 🚀", key="btn_idx"):
+        with st.spinner("Fetching Index Data..."):
+            idx_data = fetch_market_data(["^NSEI", "^NSEBANK"], period=idx_period, interval="1d")
+            nifty_df = idx_data.get("^NSEI", pd.DataFrame())
+            banknifty_df = idx_data.get("^NSEBANK", pd.DataFrame())
+            
+            if not nifty_df.empty and not banknifty_df.empty:
+                st.subheader("Comparative Performance (Normalized to Base 100)")
+                # Normalize both to 100 at the start of the period
+                nifty_norm = (nifty_df['Close'] / nifty_df['Close'].iloc[0]) * 100
+                banknifty_norm = (banknifty_df['Close'] / banknifty_df['Close'].iloc[0]) * 100
+                
+                fig_comp = go.Figure()
+                fig_comp.add_trace(go.Scatter(x=nifty_df.index, y=nifty_norm, name="NIFTY 50", line=dict(color='#00d4ff', width=2)))
+                fig_comp.add_trace(go.Scatter(x=banknifty_df.index, y=banknifty_norm, name="BANKNIFTY", line=dict(color='#ff9900', width=2)))
+                fig_comp.update_layout(title=f"Relative Strength over {idx_period}", template="plotly_dark", height=400, hovermode="x unified")
+                st.plotly_chart(fig_comp, use_container_width=True)
+                
+                st.divider()
+                st.subheader("Technical Candlestick Charts")
+                chart_col1, chart_col2 = st.columns(2)
+                
+                for title, df, col, color_th in [("NIFTY 50 (^NSEI)", nifty_df, chart_col1, '#00d4ff'), ("BANKNIFTY (^NSEBANK)", banknifty_df, chart_col2, '#ff9900')]:
+                    df_plot = df.copy()
+                    df_plot['EMA_9'] = df_plot['Close'].ewm(span=9, adjust=False).mean()
+                    df_plot['EMA_20'] = df_plot['Close'].ewm(span=20, adjust=False).mean()
+                    
+                    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
+                    fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="Price"), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_9'], line=dict(color='cyan', width=1.5), name='9 EMA'), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['EMA_20'], line=dict(color='magenta', width=1.5), name='20 EMA'), row=1, col=1)
+                    
+                    colors = ['rgba(0, 255, 0, 0.5)' if c >= o else 'rgba(255, 0, 0, 0.5)' for c, o in zip(df_plot['Close'], df_plot['Open'])]
+                    fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], marker_color=colors, name="Volume"), row=2, col=1)
+                    
+                    fig.update_layout(title=title, xaxis_rangeslider_visible=False, height=500, showlegend=False, template="plotly_dark")
+                    with col:
+                        st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.error("Could not fetch data for both indices. Please try again.")
+
+# --- TAB 6: INDEX SIMULATION LAB ---
+with tab6:
+    st.header("🧮 Index Strategy & Simulation Lab")
+    st.markdown("Dedicated experimental environment for Nifty 50 and BankNifty. Run Monte Carlo simulations and index-specific strategies.")
+    
+    ext_col1, ext_col2 = st.columns([1, 2])
+    with ext_col1:
+        st.subheader("Lab Settings")
+        sim_asset = st.selectbox("Select Index for Simulation", ["^NSEI", "^NSEBANK"], format_func=lambda x: "NIFTY 50" if x == "^NSEI" else "BANKNIFTY")
+        sim_history = st.selectbox("Historical Training Data", ["1y", "2y", "3y", "5y"], index=0)
+        
+        st.divider()
+        st.subheader("Monte Carlo Engine")
+        mc_days = st.slider("Days to Simulate Into Future", min_value=10, max_value=90, value=30, step=5)
+        mc_runs = st.slider("Number of Paths (Simulations)", min_value=100, max_value=1000, value=250, step=50)
+        run_mc = st.button("▶ Run Monte Carlo Simulation", use_container_width=True)
+        
+        st.divider()
+        st.subheader("Index Backtester")
+        index_strat = st.selectbox("Experimental Strategy", ["Intraday Gap Fade", "Mean Reversion (Future)"])
+        run_idx_strat = st.button("▶ Run Index Strategy", use_container_width=True)
+        
+    with ext_col2:
+        if run_mc:
+            with st.spinner(f"Running {mc_runs} Monte Carlo Simulations for {sim_asset}..."):
+                # Fetch history
+                sim_data = fetch_market_data([sim_asset], period=sim_history, interval="1d").get(sim_asset, pd.DataFrame())
+                if not sim_data.empty:
+                    fig_mc, mc_stats = run_monte_carlo(sim_data, days_to_simulate=mc_days, num_simulations=mc_runs)
+                    if fig_mc:
+                        st.plotly_chart(fig_mc, use_container_width=True)
+                        
+                        st.subheader("Simulation Probabilities (At End Date)")
+                        s1, s2, s3, s4 = st.columns(4)
+                        s1.metric("Current Price", mc_stats["Current Price"])
+                        s2.metric("Expected Mean", mc_stats["Expected Price (Mean)"])
+                        s3.metric("95% Bull Case High", mc_stats["95% Prob. High"])
+                        s4.metric("95% Bear Case Low", mc_stats["95% Prob. Low"])
+                        
+                        st.info(f"**Mathematical Daily Volatility constraint used:** {mc_stats['Daily Volatility']}. *Disclaimer: Monte Carlo models historical variance, it does not guarantee future results.*")
+                    else:
+                        st.error(mc_stats)
+                else:
+                    st.error("Failed to load historical data for simulation.")
+                    
+        elif run_idx_strat:
+            with st.spinner(f"Backtesting {index_strat} on {sim_asset}..."):
+                sim_data = fetch_market_data([sim_asset], period=sim_history, interval="1d").get(sim_asset, pd.DataFrame())
+                if not sim_data.empty:
+                    if index_strat == "Intraday Gap Fade":
+                        fig_strat, strat_ret = run_gap_fade_strategy(sim_data)
+                        if fig_strat:
+                            st.plotly_chart(fig_strat, use_container_width=True)
+                            st.success(f"Strategy Final Return: **{strat_ret}%**")
+                        else:
+                            st.error("Not enough data to run strategy.")
+                    else:
+                        st.warning("Strategy placeholder - Algorithm under development.")
+                else:
+                    st.error("Failed to load historical data for strategy testing.")
+        else:
+            st.info("👈 System Idle: Configure settings on the left pane and hit Run to initiate Index Lab calculations.")
+
